@@ -86,6 +86,20 @@ public class GradleDependencyAnalyzer {
                     }
                 }
 
+                Elements projectVersionElement = document.select("project>version");
+
+                if (!projectVersionElement.isEmpty()) {
+                    Element projectVersion = projectVersionElement.get(0);
+
+                    propertiesMap.put("project.version", projectVersion.text());
+                } else {
+                    Elements projectParentVersionElement = document.select("project>parent>version");
+
+                    if (!projectParentVersionElement.isEmpty()) {
+                        Element projectParentVersion = projectParentVersionElement.get(0);
+                        propertiesMap.put("project.version", projectParentVersion.text());
+                    }
+                }
 
                 Elements dependenciesElement = document.select("project>dependencies");
 
@@ -109,6 +123,10 @@ public class GradleDependencyAnalyzer {
                                 if (v != null) {
                                     childDependencyVersion = v;
                                 }
+                            } else {
+
+                                // TODO
+                                // parent > properties
                             }
                         }
 
