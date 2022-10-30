@@ -60,9 +60,10 @@ public class GradleDependencyAnalyzer {
             String version = foundDependency.getVersion();
             String url = getUrl(groupId, artifactId, version);
 
-            log.info("get={}, url={}", foundDependency, url);
+            log.info("Get={}, URL={}", foundDependency, url);
 
             if (!(StringUtils.hasText(groupId) && StringUtils.hasText(artifactId) && StringUtils.hasText(version))) {
+                log.error("Group ID = {} Artifact ID = {} Version = {}", groupId, artifactId, version);
                 return;
             }
 
@@ -75,16 +76,6 @@ public class GradleDependencyAnalyzer {
                 foundDependency.setLicenses(licenses);
 
                 Map<String, String> propertiesMap = new HashMap<>();
-
-                Elements propertiesElement = document.select("project>properties");
-
-                if (!propertiesElement.isEmpty()) {
-                    Element properties = propertiesElement.get(0);
-
-                    for (Element e : properties.children()) {
-                        propertiesMap.put(e.tagName(), e.text());
-                    }
-                }
 
                 Elements projectVersionElement = document.select("project>version");
 
@@ -101,6 +92,8 @@ public class GradleDependencyAnalyzer {
                     }
                 }
 
+                getProperties(document, propertiesMap);
+
                 Elements dependenciesElement = document.select("project>dependencies");
 
                 if (!dependenciesElement.isEmpty()) {
@@ -108,11 +101,13 @@ public class GradleDependencyAnalyzer {
 
                     for (Element dependency : dependencies) {
 
-                        String childDependencyGroupId = dependency.select("groupId").text();
-                        String childDependencyArtifactId = dependency.select("artifactId").text();
-
-                        String childDependencyVersion = dependency.select("version").text();
-
+                        String childDependencyGroupId = dependency.selectFirst("groupId").text();
+                        String childDependencyArtifactId = dependency.selectFirst("artifactId").text();
+                        Element childDependencyVersionElement = dependency.selectFirst("version");
+                        String childDependencyVersion = "";
+                        if (childDependencyVersionElement != null) {
+                            childDependencyVersion = childDependencyVersionElement.text();
+                        }
                         if (childDependencyVersion.startsWith("${") && childDependencyVersion.endsWith("}") && childDependencyVersion.length() > 3) {
                             String substring = childDependencyVersion.substring(
                                     childDependencyVersion.indexOf("{") + 1,
@@ -123,10 +118,6 @@ public class GradleDependencyAnalyzer {
                                 if (v != null) {
                                     childDependencyVersion = v;
                                 }
-                            } else {
-
-                                // TODO
-                                // parent > properties
                             }
                         }
 
@@ -137,12 +128,48 @@ public class GradleDependencyAnalyzer {
 
                         foundDependency.addDependency(childDependency);
 
+                        log.info("Get {} >> {}", foundDependency, childDependency);
                         get(dependencyMap, childDependency);
                     }
                 }
             } catch (IOException e) {
-                log.error("Connection get error={}", url);
-//                throw new RuntimeException(e);
+                log.error("URL = {}", url);
+            }
+        }
+    }
+
+    private void getProperties(Document document, Map<String, String> propertiesMap) {
+
+        Elements propertiesElement = document.select("project>properties");
+
+        if (!propertiesElement.isEmpty()) {
+            Element properties = propertiesElement.get(0);
+
+            for (Element e : properties.children()) {
+                if (propertiesMap.get(e.tagName()) == null) {
+                    propertiesMap.put(e.tagName(), e.text());
+                }
+            }
+        }
+
+
+        Dependency parentDependency = getParentDependency(document);
+
+        if (parentDependency != null) {
+            String groupId = parentDependency.getGroupId();
+            String artifactId = parentDependency.getArtifactId();
+            String version = parentDependency.getVersion();
+            String url = getUrl(groupId, artifactId, version);
+
+            Connection connection = Jsoup.connect(url);
+
+            try {
+                Document parentDocument = connection.get();
+
+                getProperties(parentDocument, propertiesMap);
+
+            } catch (IOException e) {
+                log.error("Get Parent Properties URL = {}", url);
             }
         }
     }
@@ -186,7 +213,7 @@ public class GradleDependencyAnalyzer {
                 foundLicenses = getLicenses(parentDocument);
 
             } catch (IOException e) {
-                log.error("Connection get error={}", url, e);
+                log.error("Get Parent License URL = {}", url);
             }
 
         } else {
