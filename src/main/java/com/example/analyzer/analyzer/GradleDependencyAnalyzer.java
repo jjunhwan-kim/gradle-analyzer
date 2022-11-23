@@ -15,6 +15,7 @@ import java.util.*;
 public class GradleDependencyAnalyzer {
 
     private final String repoUrl = "https://repo1.maven.org/maven2";
+    private Map<String, Document> documentCache = new HashMap<>();
 
     public void findFiles() {
         // Find .gradle files in project directory
@@ -29,11 +30,18 @@ public class GradleDependencyAnalyzer {
     }
 
     private Document getDocument(String url) {
+
+        if (documentCache.containsKey(url)) {
+            return documentCache.get(url);
+        }
+
         try {
             log.info("Request, {}", url);
-            return Jsoup.connect(url)
+            Document document = Jsoup.connect(url)
                     //.proxy(new Proxy(Proxy.Type.HTTP, new InetSocketAddress("1.1.1.1", 8080)))
                     .get();
+            documentCache.put(url, document);
+            return document;
         } catch (Exception e) {
             log.info("Get failed, {}", url);
         }
@@ -49,101 +57,139 @@ public class GradleDependencyAnalyzer {
      */
     public ResolvedDependency resolve(Dependency dependency) {
 
-        Map<String, ResolvedDependency> cache = new HashMap<>();
-        return get(cache, dependency);
+        Map<Dependency, ResolvedDependency> dependencies = new HashMap<>();
+        Set<Dependency> visit = new HashSet<>();
+
+        return get(dependency, dependencies, visit);
     }
 
-    public ResolvedDependency get(Map<String, ResolvedDependency> cache, Dependency dependency) {
+    public ResolvedDependency get(Dependency dependency, Map<Dependency, ResolvedDependency> dependencyCache, Set<Dependency> visit) {
 
         Map<String, String> properties = new HashMap<>();
 
-        if (!cache.containsKey(dependency.toString())) {
-            String groupId = dependency.getGroupId();
-            String artifactId = dependency.getArtifactId();
-            String version = dependency.getVersion();
-            String url = getUrl(groupId, artifactId, version);
-
-            Document document = getDocument(url);
-
-            if (document != null) {
-
-                List<License> licenses = getLicenses(document);
-
-                // Find project.version
-                String projectVersion = getProjectVersion(document);
-                properties.put("project.version", projectVersion);
-
-                // Find properties include parent
-                for (Map.Entry<String, String> entry : getAllProperties(document).entrySet()) {
-                    if (properties.get(entry.getKey()) == null) {
-                        properties.put(entry.getKey(), entry.getValue());
-                    }
-                }
-
-                Map<String, Dependency> dependenciesOfDependencyManagement = getAllDependenciesOfDependencyManagement(document);
-
-                // Find related dependencies
-                Set<Dependency> relatedDependencies = new HashSet<>(getAllDependencies(document));
-                List<ResolvedDependency> resolvedRelatedDependencies = new ArrayList<>();
-
-                for (Dependency relatedDependency : relatedDependencies) {
-
-                    String relatedDependencyVersion = getVersion(relatedDependency, dependenciesOfDependencyManagement, properties);
-
-                    if (StringUtils.hasText(relatedDependencyVersion)) {
-                        ResolvedDependency resolvedDependency = get(cache, new Dependency(relatedDependency.getGroupId(),
-                                relatedDependency.getArtifactId(),
-                                relatedDependencyVersion));
-                        if (resolvedDependency != null) {
-                            resolvedRelatedDependencies.add(resolvedDependency);
-                        }
-                    }
-                }
-
-                ResolvedDependency resolvedDependency = new ResolvedDependency(groupId, artifactId, version,
-                        licenses,
-                        resolvedRelatedDependencies);
-
-                cache.put(dependency.toString(), resolvedDependency);
-                return resolvedDependency;
-            }
-        } else {
-            return cache.get(dependency.toString());
+        if (dependencyCache.containsKey(dependency)) {
+            return dependencyCache.get(dependency);
         }
 
-        return null;
+        if (visit.contains(dependency)) {
+            return null;
+        }
+
+        visit.add(dependency);
+
+        String groupId = dependency.getGroupId();
+        String artifactId = dependency.getArtifactId();
+        String version = dependency.getVersion();
+        String url = getUrl(groupId, artifactId, version);
+
+        properties.put("pom.groupId", groupId);
+        properties.put("project.groupId", groupId);
+
+        Document document = getDocument(url);
+
+        if (document == null) {
+            return null;
+        }
+
+        // FInd licenses
+        List<License> licenses = getLicenses(document);
+
+        // Find project.version
+        String projectVersion = getProjectVersion(document);
+        properties.put("pom.version", projectVersion);
+        properties.put("project.version", projectVersion);
+        properties.put("version", projectVersion);
+
+        // Find properties include parent
+        for (Map.Entry<String, String> entry : getAllProperties(document).entrySet()) {
+            if (properties.get(entry.getKey()) == null) {
+                properties.put(entry.getKey(), entry.getValue());
+            }
+        }
+
+        // Find dependencyManagement
+        Map<String, Dependency> dependenciesOfDependencyManagement = getAllDependenciesOfDependencyManagement(document);
+
+        // Find related dependencies
+        Set<Dependency> relatedDependencies = new HashSet<>(getAllDependencies(document));
+        List<ResolvedDependency> resolvedRelatedDependencies = new ArrayList<>();
+
+        for (Dependency relatedDependency : relatedDependencies) {
+
+            String relatedDependencyVersion = getActualVersion(relatedDependency, dependenciesOfDependencyManagement, properties);
+
+            String relatedDependencyGroupId = relatedDependency.getGroupId();
+
+            if (relatedDependencyGroupId.startsWith("${") && version.endsWith("}")) {
+                String groupIdVariable = relatedDependencyGroupId.replace("$", "").replace("{", "").replace("}", "");
+                if (properties.containsKey(groupIdVariable)) {
+                    relatedDependencyGroupId = properties.get(groupIdVariable);
+                }
+            }
+
+            if (relatedDependency.equals(dependency)) {
+                continue;
+            }
+
+            if (StringUtils.hasText(relatedDependencyVersion)) {
+                ResolvedDependency resolvedDependency = get(new Dependency(relatedDependencyGroupId,
+                                relatedDependency.getArtifactId(),
+                                relatedDependencyVersion),
+                        dependencyCache,
+                        visit);
+                if (resolvedDependency != null) {
+                    resolvedRelatedDependencies.add(resolvedDependency);
+                }
+            } else {
+                resolvedRelatedDependencies.add(
+                        new ResolvedDependency(relatedDependencyGroupId, relatedDependency.getArtifactId(), relatedDependency.getVersion(),
+                                Collections.emptyList(),
+                                Collections.emptyList())
+                );
+            }
+        }
+
+        ResolvedDependency resolvedDependency = new ResolvedDependency(groupId, artifactId, version,
+                licenses,
+                resolvedRelatedDependencies);
+
+        dependencyCache.put(dependency, resolvedDependency);
+        return resolvedDependency;
+
     }
 
-    private String getVersion(Dependency dependency,
-                              Map<String, Dependency> dependenciesOfDependencyManagement,
-                              Map<String, String> properties) {
-        String version = "";
+    private String getActualVersion(Dependency dependency,
+                                    Map<String, Dependency> dependenciesOfDependencyManagement,
+                                    Map<String, String> properties) {
 
-        if (!StringUtils.hasText(dependency.getVersion())) {
+        String version = dependency.getVersion();
 
-            Dependency dependencyOfDependencyManagement = dependenciesOfDependencyManagement.get(dependency.getGroupId() + ":" + dependency.getArtifactId());
+        if (StringUtils.hasText(dependency.getVersion())) {
+            version = version.trim();
 
-            if (dependencyOfDependencyManagement != null) {
-                if (StringUtils.hasText(dependencyOfDependencyManagement.getVersion())) {
-                    if (dependencyOfDependencyManagement.getVersion().startsWith("$")) {
-                        String v = properties.get(dependencyOfDependencyManagement.getVersion().replace("$", "").replace("{", "").replace("}", ""));
-                        if (v != null) {
-                            version = v;
-                        }
-                    } else {
-                        version = dependencyOfDependencyManagement.getVersion();
+            if (version.startsWith("${") && version.endsWith("}")) {
+                String versionVariable = version.replace("$", "").replace("{", "").replace("}", "");
+                if (properties.containsKey(versionVariable)) {
+                    return properties.get(versionVariable);
+                }
+            }
+        } else { // White Space or Empty or null
+
+            String key = dependency.getGroupId() + ":" + dependency.getArtifactId();
+
+            if (dependenciesOfDependencyManagement.containsKey(key)) {
+                Dependency dependencyOfDependencyManagement = dependenciesOfDependencyManagement.get(key);
+
+                version = dependencyOfDependencyManagement.getVersion();
+                version = version.trim();
+
+                if (version.startsWith("${") && version.endsWith("}")) {
+                    String versionVariable = version.replace("$", "").replace("{", "").replace("}", "");
+                    if (properties.containsKey(versionVariable)) {
+                        return properties.get(versionVariable);
                     }
                 }
             }
-        } else if (dependency.getVersion().startsWith("$")) {
-            String versionVariable = dependency.getVersion().replace("$", "").replace("{", "").replace("}", "");
-            String v = properties.get(versionVariable);
-            if (v != null) {
-                version = v;
-            }
-
-        } else {
-            version = dependency.getVersion();
         }
 
         return version;
@@ -211,23 +257,35 @@ public class GradleDependencyAnalyzer {
                 String artifactId = "";
                 String version = "";
 
-                if (e.selectFirst("scope") != null) {
-                    String scope = e.selectFirst("scope").text();
+                Element groupIdElement = e.selectFirst("groupId");
+                Element artifactIdElement = e.selectFirst("artifactId");
+                Element versionElement = e.selectFirst("version");
 
-                    if ("compile".equals(scope) || "runtime".equals(scope)) {
-                    //if (true) {
-                        if (e.selectFirst("groupId") != null) {
-                            groupId = e.selectFirst("groupId").text();
-                        }
+                if (groupIdElement != null) {
+                    groupId = groupIdElement.text();
+                }
 
-                        if (e.selectFirst("artifactId") != null) {
-                            artifactId = e.selectFirst("artifactId").text();
-                        }
+                if (artifactIdElement != null) {
+                    artifactId = artifactIdElement.text();
+                }
 
-                        if (e.selectFirst("version") != null) {
-                            version = e.selectFirst("version").text();
-                        }
+                if (versionElement != null) {
+                    version = versionElement.text();
+                }
 
+                Element scopeElement = e.selectFirst("scope");
+                if (scopeElement == null) {
+                    if (StringUtils.hasText(groupId) && StringUtils.hasText(artifactId)) {
+                        dependencies.add(new Dependency(
+                                groupId,
+                                artifactId,
+                                version));
+                    }
+                } else {
+                    String scope = scopeElement.text();
+
+                    //if ("compile".equals(scope) || "runtime".equals(scope)) {
+                    if (true) {
                         if (StringUtils.hasText(groupId) && StringUtils.hasText(artifactId)) {
                             dependencies.add(new Dependency(
                                     groupId,
@@ -307,26 +365,24 @@ public class GradleDependencyAnalyzer {
                 String artifactId = "";
                 String version = "";
 
-                if (e.selectFirst("groupId") != null) {
-                    groupId = e.selectFirst("groupId").text();
+                Element groupIdElement = e.selectFirst("groupId");
+                Element artifactIdElement = e.selectFirst("artifactId");
+                Element versionElement = e.selectFirst("version");
+
+                if (groupIdElement != null) {
+                    groupId = groupIdElement.text();
                 }
 
-                if (e.selectFirst("artifactId") != null) {
-                    artifactId = e.selectFirst("artifactId").text();
+                if (artifactIdElement != null) {
+                    artifactId = artifactIdElement.text();
                 }
 
-                if (e.selectFirst("version") != null) {
-                    version = e.selectFirst("version").text();
+                if (versionElement != null) {
+                    version = versionElement.text();
                 }
 
                 if (StringUtils.hasText(groupId) && StringUtils.hasText(artifactId)) {
-                    dependencies.put(
-                            groupId + ":" + artifactId,
-                            new Dependency(
-                                    groupId,
-                                    artifactId,
-                                    version)
-                    );
+                    dependencies.put(groupId + ":" + artifactId, new Dependency(groupId, artifactId, version));
                 }
             }
         }
