@@ -1,7 +1,6 @@
 package com.example.analyzer.analyzer;
 
 import lombok.extern.slf4j.Slf4j;
-import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -9,7 +8,6 @@ import org.jsoup.select.Elements;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
-import java.io.IOException;
 import java.util.*;
 
 @Slf4j
@@ -19,80 +17,61 @@ public class GradleDependencyAnalyzer {
     private final String repoUrl = "https://repo1.maven.org/maven2";
 
     public void findFiles() {
-
         // Find .gradle files in project directory
     }
 
     public void analyze() {
-
-        // analyze .gradle file
-
-
+        // Analyze .gradle file
     }
 
     public void parse() {
-
-        // find dependency line in .gradle file
-
-
+        // Extract group, artifact, version in .gradle file
     }
 
-    public List<Dependency> find(Dependency dependency) {
+    private Document getDocument(String url) {
+        try {
+            log.info("Request, {}", url);
+            return Jsoup.connect(url)
+                    //.proxy(new Proxy(Proxy.Type.HTTP, new InetSocketAddress("1.1.1.1", 8080)))
+                    .get();
+        } catch (Exception e) {
+            log.info("Get failed, {}", url);
+        }
 
-        Map<String, Dependency> cache = new HashMap<>();
+        return null;
+    }
 
+    /**
+     * Find license and related dependency
+     *
+     * @param dependency
+     * @return
+     */
+    public ResolvedDependency resolve(Dependency dependency) {
 
+        Map<String, ResolvedDependency> cache = new HashMap<>();
         return get(cache, dependency);
-
     }
 
-    private String getUrl(String groupId, String artifactId, String version) {
-        return this.repoUrl + "/"
-                + groupId.replace(".", "/") + "/"
-                + artifactId + "/"
-                + version + "/"
-                + artifactId + "-" + version + ".pom";
-    }
+    public ResolvedDependency get(Map<String, ResolvedDependency> cache, Dependency dependency) {
 
-    public List<Dependency> get(Map<String, Dependency> cache, Dependency dependency) {
-
-        List<Dependency> dependencies = new ArrayList<>();
         Map<String, String> properties = new HashMap<>();
-        // Get information from maven repository
 
         if (!cache.containsKey(dependency.toString())) {
-            cache.put(dependency.toString(), dependency);
-            dependencies.add(dependency);
-
-
             String groupId = dependency.getGroupId();
             String artifactId = dependency.getArtifactId();
             String version = dependency.getVersion();
             String url = getUrl(groupId, artifactId, version);
 
-            log.info("Get={}, URL={}", dependency, url);
+            Document document = getDocument(url);
 
-            try {
-                Document document = Jsoup.connect(url).get();
+            if (document != null) {
 
                 List<License> licenses = getLicenses(document);
-                dependency.setLicenses(licenses);
 
                 // Find project.version
-                Elements projectVersionElement = document.select("project>version");
-
-                if (!projectVersionElement.isEmpty()) {
-                    Element projectVersion = projectVersionElement.get(0);
-
-                    properties.put("project.version", projectVersion.text());
-                } else {
-                    Elements projectParentVersionElement = document.select("project>parent>version");
-
-                    if (!projectParentVersionElement.isEmpty()) {
-                        Element projectParentVersion = projectParentVersionElement.get(0);
-                        properties.put("project.version", projectParentVersion.text());
-                    }
-                }
+                String projectVersion = getProjectVersion(document);
+                properties.put("project.version", projectVersion);
 
                 // Find properties include parent
                 for (Map.Entry<String, String> entry : getAllProperties(document).entrySet()) {
@@ -104,52 +83,70 @@ public class GradleDependencyAnalyzer {
                 Map<String, Dependency> dependenciesOfDependencyManagement = getAllDependenciesOfDependencyManagement(document);
 
                 // Find related dependencies
-                List<Dependency> relatedDependencies = getDependencies(document);
+                Set<Dependency> relatedDependencies = new HashSet<>(getAllDependencies(document));
+                List<ResolvedDependency> resolvedRelatedDependencies = new ArrayList<>();
 
                 for (Dependency relatedDependency : relatedDependencies) {
-                    String relatedDependencyVersion = "";
 
-                    if (!StringUtils.hasText(relatedDependency.getVersion())) {
-
-                        Dependency dependencyOfDependencyManagement = dependenciesOfDependencyManagement.get(relatedDependency.getGroupId() + ":" + relatedDependency.getArtifactId());
-
-                        if (dependencyOfDependencyManagement != null) {
-                            if (StringUtils.hasText(dependencyOfDependencyManagement.getVersion())) {
-                                if (dependencyOfDependencyManagement.getVersion().startsWith("$")) {
-                                    String v = properties.get(dependencyOfDependencyManagement.getVersion().replace("$", "").replace("{", "").replace("}", ""));
-                                    if (v != null) {
-                                        relatedDependencyVersion = v;
-                                    }
-                                } else {
-                                    relatedDependencyVersion = dependencyOfDependencyManagement.getVersion();
-                                }
-                            }
-                        }
-                    } else if (relatedDependency.getVersion().startsWith("$")) {
-                        String versionVariable = relatedDependency.getVersion().replace("$", "").replace("{", "").replace("}", "");
-                        String v = properties.get(versionVariable);
-                        if (v != null) {
-                            relatedDependencyVersion = v;
-                        }
-
-                    } else {
-                        relatedDependencyVersion = relatedDependency.getVersion();
-                    }
+                    String relatedDependencyVersion = getVersion(relatedDependency, dependenciesOfDependencyManagement, properties);
 
                     if (StringUtils.hasText(relatedDependencyVersion)) {
-                        List<Dependency> related = get(cache, new Dependency(relatedDependency.getGroupId(), relatedDependency.getArtifactId(), relatedDependencyVersion));
-
-                        dependencies.addAll(related);
+                        ResolvedDependency resolvedDependency = get(cache, new Dependency(relatedDependency.getGroupId(),
+                                relatedDependency.getArtifactId(),
+                                relatedDependencyVersion));
+                        if (resolvedDependency != null) {
+                            resolvedRelatedDependencies.add(resolvedDependency);
+                        }
                     }
                 }
 
+                ResolvedDependency resolvedDependency = new ResolvedDependency(groupId, artifactId, version,
+                        licenses,
+                        resolvedRelatedDependencies);
 
-            } catch (IOException e) {
-                log.error("URL = {}", url);
+                cache.put(dependency.toString(), resolvedDependency);
+                return resolvedDependency;
             }
+        } else {
+            return cache.get(dependency.toString());
         }
 
-        return dependencies;
+        return null;
+    }
+
+    private String getVersion(Dependency dependency,
+                              Map<String, Dependency> dependenciesOfDependencyManagement,
+                              Map<String, String> properties) {
+        String version = "";
+
+        if (!StringUtils.hasText(dependency.getVersion())) {
+
+            Dependency dependencyOfDependencyManagement = dependenciesOfDependencyManagement.get(dependency.getGroupId() + ":" + dependency.getArtifactId());
+
+            if (dependencyOfDependencyManagement != null) {
+                if (StringUtils.hasText(dependencyOfDependencyManagement.getVersion())) {
+                    if (dependencyOfDependencyManagement.getVersion().startsWith("$")) {
+                        String v = properties.get(dependencyOfDependencyManagement.getVersion().replace("$", "").replace("{", "").replace("}", ""));
+                        if (v != null) {
+                            version = v;
+                        }
+                    } else {
+                        version = dependencyOfDependencyManagement.getVersion();
+                    }
+                }
+            }
+        } else if (dependency.getVersion().startsWith("$")) {
+            String versionVariable = dependency.getVersion().replace("$", "").replace("{", "").replace("}", "");
+            String v = properties.get(versionVariable);
+            if (v != null) {
+                version = v;
+            }
+
+        } else {
+            version = dependency.getVersion();
+        }
+
+        return version;
     }
 
     private Map<String, String> getAllProperties(Document document) {
@@ -163,9 +160,10 @@ public class GradleDependencyAnalyzer {
             url = getUrl(parentDependency.getGroupId(),
                     parentDependency.getArtifactId(),
                     parentDependency.getVersion());
-            try {
-                document = Jsoup.connect(url).get();
 
+            document = getDocument(url);
+
+            if (document != null) {
                 Map<String, String> parentProperties = getAllProperties(document);
 
                 for (Map.Entry<String, String> entry : parentProperties.entrySet()) {
@@ -173,8 +171,6 @@ public class GradleDependencyAnalyzer {
                         properties.put(entry.getKey(), entry.getValue());
                     }
                 }
-            } catch (IOException e) {
-                log.error("Get failed, {}", url);
             }
         }
 
@@ -202,7 +198,7 @@ public class GradleDependencyAnalyzer {
 
     private List<Dependency> getDependencies(Document document) {
 
-        List<Dependency> dependencyList = new ArrayList<>();
+        List<Dependency> dependencies = new ArrayList<>();
 
         Elements dependenciesElement = document.select("project>dependencies");
 
@@ -219,7 +215,7 @@ public class GradleDependencyAnalyzer {
                     String scope = e.selectFirst("scope").text();
 
                     if ("compile".equals(scope) || "runtime".equals(scope)) {
-
+                    //if (true) {
                         if (e.selectFirst("groupId") != null) {
                             groupId = e.selectFirst("groupId").text();
                         }
@@ -233,7 +229,7 @@ public class GradleDependencyAnalyzer {
                         }
 
                         if (StringUtils.hasText(groupId) && StringUtils.hasText(artifactId)) {
-                            dependencyList.add(new Dependency(
+                            dependencies.add(new Dependency(
                                     groupId,
                                     artifactId,
                                     version));
@@ -243,7 +239,29 @@ public class GradleDependencyAnalyzer {
             }
         }
 
-        return dependencyList;
+        return dependencies;
+    }
+
+    private List<Dependency> getAllDependencies(Document document) {
+
+        String url;
+        List<Dependency> dependencies = getDependencies(document);
+
+        Dependency parentDependency = getParentDependency(document);
+
+        if (parentDependency != null) {
+            url = getUrl(parentDependency.getGroupId(),
+                    parentDependency.getArtifactId(),
+                    parentDependency.getVersion());
+
+            document = getDocument(url);
+
+            if (document != null) {
+                dependencies.addAll(getAllDependencies(document));
+            }
+        }
+
+        return dependencies;
     }
 
     private Map<String, Dependency> getAllDependenciesOfDependencyManagement(Document document) {
@@ -257,8 +275,9 @@ public class GradleDependencyAnalyzer {
             url = getUrl(parentDependency.getGroupId(),
                     parentDependency.getArtifactId(),
                     parentDependency.getVersion());
-            try {
-                document = Jsoup.connect(url).get();
+            document = getDocument(url);
+
+            if (document != null) {
 
                 Map<String, Dependency> parentDependencies = getAllDependenciesOfDependencyManagement(document);
 
@@ -267,8 +286,6 @@ public class GradleDependencyAnalyzer {
                         dependencies.put(entry.getKey(), entry.getValue());
                     }
                 }
-            } catch (IOException e) {
-                log.error("Get failed, {}", url);
             }
         }
 
@@ -333,45 +350,65 @@ public class GradleDependencyAnalyzer {
 
     private List<License> getLicenses(Document document) {
 
-        List<License> foundLicenses = new ArrayList<>();
+        List<License> licenses = new ArrayList<>();
 
         Elements licensesElement = document.select("licenses");
 
         if (licensesElement.isEmpty()) {
             Dependency parentDependency = getParentDependency(document);
 
-            if (parentDependency == null) {
-                return foundLicenses;
+            if (parentDependency != null) {
+                String groupId = parentDependency.getGroupId();
+                String artifactId = parentDependency.getArtifactId();
+                String version = parentDependency.getVersion();
+                String url = getUrl(groupId, artifactId, version);
+
+                Document parentDocument = getDocument(url);
+
+                if (parentDocument != null) {
+                    licenses.addAll(getLicenses(parentDocument));
+                }
             }
-
-            String groupId = parentDependency.getGroupId();
-            String artifactId = parentDependency.getArtifactId();
-            String version = parentDependency.getVersion();
-            String url = getUrl(groupId, artifactId, version);
-
-            Connection connection = Jsoup.connect(url);
-
-            try {
-                Document parentDocument = connection.get();
-                foundLicenses = getLicenses(parentDocument);
-
-            } catch (IOException e) {
-                log.error("Get Parent License URL = {}", url);
-            }
-
         } else {
-            Elements licenses = licensesElement.select("license");
+            Elements elements = licensesElement.select("license");
 
-            for (Element license : licenses) {
-                License foundLicense = new License(
-                        license.select("name").text(),
-                        license.select("url").text(),
-                        license.select("comment").text());
+            for (Element e : elements) {
+                License license = new License(
+                        e.select("name").text(),
+                        e.select("url").text(),
+                        e.select("comment").text());
 
-                foundLicenses.add(foundLicense);
+                licenses.add(license);
             }
         }
 
-        return foundLicenses;
+        return licenses;
+    }
+
+    private String getProjectVersion(Document document) {
+
+        Elements projectVersionElement = document.select("project>version");
+
+        if (!projectVersionElement.isEmpty()) {
+            Element projectVersion = projectVersionElement.get(0);
+            return projectVersion.text();
+        } else {
+            Elements projectParentVersionElement = document.select("project>parent>version");
+
+            if (!projectParentVersionElement.isEmpty()) {
+                Element projectParentVersion = projectParentVersionElement.get(0);
+                return projectParentVersion.text();
+            }
+        }
+
+        return null;
+    }
+
+    private String getUrl(String groupId, String artifactId, String version) {
+        return this.repoUrl + "/"
+                + groupId.replace(".", "/") + "/"
+                + artifactId + "/"
+                + version + "/"
+                + artifactId + "-" + version + ".pom";
     }
 }
